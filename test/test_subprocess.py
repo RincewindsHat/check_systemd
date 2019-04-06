@@ -31,7 +31,11 @@ class TestSubprocess(unittest.TestCase):
                 stdout=subprocess.PIPE,
             )
         self.assertEqual(process.returncode, 0)
-        self.assertEqual(process.stdout, 'SYSTEMD OK - all | failed_units=0\n')
+        self.assertEqual(
+            process.stdout,
+            'SYSTEMD OK | units_activating=0 units_active=275 units_failed=0 '
+            'units_inactive=111\n'
+        )
 
     def test_ok_verbose(self):
         with AddBin('bin/ok'):
@@ -53,9 +57,11 @@ class TestSubprocess(unittest.TestCase):
                 stdout=subprocess.PIPE,
             )
         self.assertEqual(process.returncode, 2)
-        self.assertEqual(process.stdout,
-                         'SYSTEMD CRITICAL - test.service: failed'
-                         ' | failed_units=1\n')
+        self.assertEqual(
+            process.stdout,
+            'SYSTEMD CRITICAL - smartd.service: failed | units_activating=0 '
+            'units_active=1 units_failed=1 units_inactive=1\n'
+        )
 
     def test_failure_verbose(self):
         with AddBin('bin/failure'):

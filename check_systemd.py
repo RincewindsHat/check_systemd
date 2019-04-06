@@ -27,7 +27,8 @@ class SystemdStatus(nagiosplugin.Resource):
     def probe(self):
         # Execute systemctl --failed --no-legend and get output
         try:
-            p = subprocess.Popen(['systemctl', '--failed', '--no-legend'],
+            p = subprocess.Popen(['systemctl', 'list-units', '--all',
+                                  '--no-legend'],
                                  stderr=subprocess.PIPE,
                                  stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE)
@@ -44,19 +45,30 @@ class SystemdStatus(nagiosplugin.Resource):
         if stdout:
             # Output of `systemctl --failed --no-legend`:
             # foobar.service loaded failed failed Description text
+            units = {
+                'failed': [],
+                'active': [],
+                'activating': [],
+                'inactive': [],
+            }
             for line in io.StringIO(stdout.decode('utf-8')):
                 split_line = line.split()
                 # foobar.service
                 unit = split_line[0]
                 # failed
                 active = split_line[2]
+                units[active].append(unit)
+
+            for unit in units['failed']:
                 if unit not in self.excludes:
                     failed_units += 1
-                    yield nagiosplugin.Metric(name=unit, value=active,
+                    yield nagiosplugin.Metric(name=unit, value='failed',
                                               context='systemd')
 
-        yield nagiosplugin.Metric(name='failed_units', value=failed_units,
-                                  min=0, context='systemd')
+            for active, unit_names in units.items():
+                yield nagiosplugin.Metric(name='units_{}'.format(active),
+                                          value=len(units[active]),
+                                          context='systemd_perf')
         if failed_units == 0:
             yield nagiosplugin.Metric(name='all', value=None,
                                       context='systemd')
@@ -112,10 +124,15 @@ class SystemdContext(nagiosplugin.Context):
         else:
             return self.result_cls(nagiosplugin.Ok, metric=metric, hint=hint)
 
+
+class SystemdPerfContext(nagiosplugin.Context):
+
+    def __init__(self):
+        super(SystemdPerfContext, self).__init__('systemd_perf')
+
     def performance(self, metric, resource):
-        if metric.name == 'failed_units':
-            return nagiosplugin.Performance(label=metric.name,
-                                            value=metric.value)
+        return nagiosplugin.Performance(label=metric.name, value=metric.value)
+
 
 
 class SystemdSummary(nagiosplugin.Summary):
@@ -129,14 +146,14 @@ class SystemdSummary(nagiosplugin.Summary):
     def problem(self, results):
         show = []
         for result in results.most_significant:
-            if 'failed_units' not in str(result):
+            if result.context == 'systemd':
                 show.append(result)
         return ', '.join(['{0}'.format(result) for result in show])
 
     def verbose(self, results):
         show = []
         for result in results.most_significant:
-            if 'failed_units' not in str(result):
+            if result.context == 'systemd':
                 show.append(result)
         return ['{0}: {1}'.format(result.state, result) for result in show]
 
@@ -188,6 +205,7 @@ def main():
         check = nagiosplugin.Check(
             SystemdStatus(excludes=args.exclude),
             SystemdContext(),
+            SystemdPerfContext(),
             SystemdSummary())
 
     check.main(args.verbose)
