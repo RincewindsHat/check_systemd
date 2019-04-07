@@ -11,6 +11,7 @@ import subprocess
 import argparse
 
 import nagiosplugin
+from nagiosplugin import Metric
 
 __version__ = '2.0.2'
 
@@ -25,7 +26,8 @@ class SystemdStatus(nagiosplugin.Resource):
         self.excludes = excludes
 
     def probe(self):
-        # Execute systemctl --failed --no-legend and get output
+        # We don’t use `systemctl --failed --no-legend`, because we want to
+        # collect performance data of all units.
         try:
             p = subprocess.Popen(['systemctl', 'list-units', '--all',
                                   '--no-legend'],
@@ -39,39 +41,44 @@ class SystemdStatus(nagiosplugin.Resource):
         if stderr:
             raise nagiosplugin.CheckError(stderr)
 
-        # The --exclude option causes that all is ok, but there are some lines
-        # in stdout.
-        failed_units = 0
+        # Dictionary to store all units according their active state.
+        units = {
+            'failed': [],
+            'active': [],
+            'activating': [],
+            'inactive': [],
+        }
         if stdout:
-            # Output of `systemctl --failed --no-legend`:
-            # foobar.service loaded failed failed Description text
-            units = {
-                'failed': [],
-                'active': [],
-                'activating': [],
-                'inactive': [],
-            }
+            # Output of `systemctl list-units --all --no-legend`:
+            # UNIT           LOAD   ACTIVE SUB     JOB   DESCRIPTION
+            # foobar.service loaded active waiting       Description text
+
+            count_units = 0
             for line in io.StringIO(stdout.decode('utf-8')):
                 split_line = line.split()
                 # foobar.service
                 unit = split_line[0]
                 # failed
                 active = split_line[2]
-                units[active].append(unit)
+                # Only count not excludes units.
+                if unit not in self.excludes:
+                    units[active].append(unit)
+                    count_units += 1
 
             for unit in units['failed']:
                 if unit not in self.excludes:
-                    failed_units += 1
-                    yield nagiosplugin.Metric(name=unit, value='failed',
-                                              context='systemd')
+                    yield Metric(name=unit, value='failed', context='unit')
 
             for active, unit_names in units.items():
-                yield nagiosplugin.Metric(name='units_{}'.format(active),
-                                          value=len(units[active]),
-                                          context='systemd_perf')
-        if failed_units == 0:
-            yield nagiosplugin.Metric(name='all', value=None,
-                                      context='systemd')
+                yield Metric(name='units_{}'.format(active),
+                             value=len(units[active]),
+                             context='performance_data')
+
+            yield Metric(name='count_units', value=count_units,
+                         context='performance_data')
+
+        if len(units['failed']) == 0:
+            yield Metric(name='all', value=None, context='unit')
 
 
 class ServiceStatus(nagiosplugin.Resource):
@@ -104,16 +111,16 @@ class ServiceStatus(nagiosplugin.Resource):
                 if active == 'failed':
                     yield nagiosplugin.Metric(name='failed_units',
                                               value=1,
-                                              context='systemd')
+                                              context='performance_data')
                 yield nagiosplugin.Metric(name=self.unit,
                                           value=active,
-                                          context='systemd')
+                                          context='unit')
 
 
-class SystemdContext(nagiosplugin.Context):
+class UnitContext(nagiosplugin.Context):
 
     def __init__(self):
-        super(SystemdContext, self).__init__('systemd')
+        super(UnitContext, self).__init__('unit')
 
     def evaluate(self, metric, resource):
         hint = '%s: %s' % (metric.name, metric.value) \
@@ -125,35 +132,34 @@ class SystemdContext(nagiosplugin.Context):
             return self.result_cls(nagiosplugin.Ok, metric=metric, hint=hint)
 
 
-class SystemdPerfContext(nagiosplugin.Context):
+class PerformanceDataContext(nagiosplugin.Context):
 
     def __init__(self):
-        super(SystemdPerfContext, self).__init__('systemd_perf')
+        super(PerformanceDataContext, self).__init__('performance_data')
 
     def performance(self, metric, resource):
         return nagiosplugin.Performance(label=metric.name, value=metric.value)
-
 
 
 class SystemdSummary(nagiosplugin.Summary):
 
     def ok(self, results):
         for result in results.most_significant:
-            if 'failed_units' not in str(result):
+            if isinstance(result.context, UnitContext):
                 return '{0}'.format(result)
         return 'all'
 
     def problem(self, results):
         show = []
         for result in results.most_significant:
-            if result.context == 'systemd':
+            if isinstance(result.context, UnitContext):
                 show.append(result)
         return ', '.join(['{0}'.format(result) for result in show])
 
     def verbose(self, results):
         show = []
         for result in results.most_significant:
-            if result.context == 'systemd':
+            if isinstance(result.context, UnitContext):
                 show.append(result)
         return ['{0}: {1}'.format(result.state, result) for result in show]
 
@@ -197,16 +203,16 @@ def main():
     args = get_argparser().parse_args()
 
     if args.unit:
-        check = nagiosplugin.Check(
-            ServiceStatus(unit=args.unit),
-            SystemdContext(),
-            SystemdSummary())
+        resource = ServiceStatus(unit=args.unit)
     else:
-        check = nagiosplugin.Check(
-            SystemdStatus(excludes=args.exclude),
-            SystemdContext(),
-            SystemdPerfContext(),
-            SystemdSummary())
+        resource = SystemdStatus(excludes=args.exclude)
+
+    check = nagiosplugin.Check(
+        resource,
+        UnitContext(),
+        PerformanceDataContext(),
+        SystemdSummary()
+    )
 
     check.main(args.verbose)
 
